@@ -29,6 +29,7 @@ import re
 import socket
 import subprocess
 import threading
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,7 @@ LISTEN     = ("127.0.0.1", 8765)                        # local-only; the app ta
 CONFIG_DIR = os.path.expanduser("~/.config/g8-volume")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token.txt")
 IP_CACHE   = os.path.join(CONFIG_DIR, "last_ip.txt")
+KEEPALIVE_SECS = 30                                     # reconnect cadence to stay warm
 # ---------------------------------------------------------------------------
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -161,28 +163,96 @@ def discover_tv(force=False):
 
 
 # ---------------------------------------------------------------------------
-# samsungtvws connection (rebuilt on failure, re-discovering the IP).
+# Persistent, warm samsungtvws connection.
+#
+# The library connects lazily and never pings, and the TV idle-closes the remote
+# socket after a while — so a cold first press lagged on the TLS+token handshake,
+# and the first press after an idle-close was silently dropped (sent into a
+# half-closed socket the library hadn't noticed). Instead we keep ONE warm
+# connection: open eagerly, run a reader thread so a TV-side close flips
+# is_alive() at once, and a keepalive thread that reconnects in the background so
+# presses stay instant. discover_tv() re-resolves the IP whenever a reconnect fails.
 # ---------------------------------------------------------------------------
-def _build(ip):
-    # key_press_delay defaults to 1.5s in the library — lethal for volume; force 0.
-    return SamsungTVWS(host=ip, port=8002, token_file=TOKEN_FILE,
-                       name="MacVolumeBridge", key_press_delay=0)
-
-
 _tv_ip = discover_tv()
-tv = _build(_tv_ip)
+tv = None
+
+
+def _new_tv(ip):
+    # key_press_delay defaults to 1.5s in the library — lethal for volume; force 0.
+    # timeout bounds the connect handshake so an asleep TV doesn't hang reconnects.
+    return SamsungTVWS(host=ip, port=8002, token_file=TOKEN_FILE,
+                       name="MacVolumeBridge", key_press_delay=0, timeout=5)
+
+
+def _listen(conn):
+    """Drain frames so a TV-side close is seen at once, then warm a fresh socket."""
+    try:
+        while conn.recv():
+            pass
+    except Exception:
+        pass
+    _warm()                       # connection died — reconnect in the background
+
+
+def _connect():
+    """Open a fresh warm connection (+ reader) to _tv_ip. Raises if unreachable."""
+    global tv
+    t = _new_tv(_tv_ip)
+    t.open()                      # TLS + token handshake (the slow part) up front
+    t.connection.settimeout(None)  # but the reader must block indefinitely, not time out
+    threading.Thread(target=_listen, args=(t.connection,), daemon=True).start()
+    tv = t
+    return t
+
+
+def _ensure_connection():
+    """Return a live connection, reconnecting (and re-discovering the IP) if needed."""
+    global tv, _tv_ip
+    if tv is not None and tv.is_alive():
+        return tv
+    try:
+        if tv is not None:
+            tv.close()
+    except Exception:
+        pass
+    tv = None
+    try:
+        return _connect()
+    except Exception:
+        _tv_ip = discover_tv(force=True)
+        return _connect()
+
+
+def _warm():
+    """Best-effort: ensure the connection is up (startup + keepalive + reader use this)."""
+    try:
+        with _lock:
+            _ensure_connection()
+    except Exception:
+        pass
+
+
+def _keepalive_loop():
+    """Keep the socket warm so presses never pay a reconnect (or drop a press)."""
+    while True:
+        _warm()
+        time.sleep(KEEPALIVE_SECS)
 
 
 def press(key):
-    """Send one key, rebuilding (and re-discovering) once if the socket is stale."""
-    global tv, _tv_ip
+    """Send one key over the warm socket, forcing a fresh reconnect if it just died."""
+    global tv
     with _lock:
         try:
-            tv.send_key(key, key_press_delay=0)
+            _ensure_connection().send_key(key, key_press_delay=0)
         except Exception:
-            _tv_ip = discover_tv(force=True)
-            tv = _build(_tv_ip)
-            tv.send_key(key, key_press_delay=0)
+            try:
+                if tv is not None:
+                    tv.close()
+            except Exception:
+                pass
+            tv = None
+            _ensure_connection().send_key(key, key_press_delay=0)
 
 
 # ---------------------------------------------------------------------------
@@ -204,11 +274,14 @@ def press(key):
 class Handler(BaseHTTPRequestHandler):
     def _json(self, code, payload):
         body = json.dumps(payload).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client (or a daemon restart) closed the socket early — ignore
 
     def do_GET(self):
         path = self.path.strip("/").lower()
@@ -240,4 +313,6 @@ if __name__ == "__main__":
           flush=True)
     print("First key press will pop the 'Allow' dialog on the monitor — accept it once.",
           flush=True)
+    # Warm the connection now and keep it warm, so presses don't pay the handshake.
+    threading.Thread(target=_keepalive_loop, daemon=True).start()
     ThreadingHTTPServer(LISTEN, Handler).serve_forever()
