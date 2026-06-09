@@ -9,36 +9,46 @@ ARC is carrying PCM or a bitstream, with no software attenuation on the Mac.
 Two pieces:
 
 - **`G8 Volume.app`** — a tiny, code-signed SwiftUI menu-bar app (no Dock icon). It
-  captures the keyboard volume/mute keys (`CGEventTap`) and reads the active output
-  device (CoreAudio). **Only when the G8 is the active output** does it hijack the
-  keys; otherwise it passes them straight through so native macOS volume behavior is
-  fully restored. It also draws an Apple-style on-screen volume HUD showing the
-  monitor's **real** level (read back over UPnP), since macOS won't draw its own once
-  we swallow the key.
+  captures the keyboard volume/mute keys (`CGEventTap`, at the HID level) and reads
+  the active output device (CoreAudio). **Only when the G8 is the active output**
+  does it hijack the keys; otherwise it passes them straight through so native macOS
+  volume behavior is fully restored. Since macOS won't draw its own HUD once we
+  swallow the key, the app draws a small on-screen **relative** cue (▲ / ▼ / muted)
+  — see "Why the HUD is relative" below.
 - **`g8_volume_bridge.py`** — an always-on local daemon (LaunchAgent) holding one
   persistent WebSocket to the G8. It converts `http://127.0.0.1:8765/up|down|mute`
-  into `KEY_VOLUP` / `KEY_VOLDOWN` / `KEY_MUTE`, and after each key reads the
-  monitor's actual volume/mute over UPnP and returns it for the HUD.
+  into `KEY_VOLUP` / `KEY_VOLDOWN` / `KEY_MUTE`.
 
 ```
  ┌───────────────────────────────────────────────┐
  │  G8 Volume.app (signed SwiftUI, menu-bar only) │  [🔊] green = active on G8
- │  • CGEventTap on media keys (Accessibility)    │
+ │  • HID CGEventTap on media keys (Accessibility │
+ │    + Input Monitoring)                          │
  │  • CoreAudio: is the G8 the active output?     │
  │      yes → swallow key + ping daemon + show HUD │
  │      no  → pass event through (native keys)     │
- └───────────────┬───────────────────▲───────────┘
-        HTTP GET │ /up|down|mute      │ JSON {volume,muted,tv_ip}
-                 ▼ 127.0.0.1:8765     │
+ └───────────────┬─────────────────────────────────┘
+        HTTP GET │ /up|down|mute   (relative HUD shown locally)
+                 ▼ 127.0.0.1:8765
  ┌───────────────────────────────────────────────┐
  │  g8_volume_bridge.py (venv, LaunchAgent)       │
  │  • persistent samsungtvws WebSocket → G8 :8002 │
- │  • UPnP GetVolume/GetMute → real level (:9197) │
  │  • discover_tv(): cache → TV_IP → MAC scan     │
  └──────┬─────────────────────────────────────────┘
    wss  │ :8002 (token, self-signed TLS)
-        ▼  KEY_VOLUP/DOWN/MUTE → G8 OSD volume → soundbar over ARC
+        ▼  KEY_VOLUP/DOWN/MUTE → G8 volume stage → soundbar over ARC
 ```
+
+## Why the HUD is relative
+
+The keys drive the G8's volume stage, which passes audio out over ARC to an
+external (non-Samsung) soundbar via HDMI-CEC — so the *real* level lives in that
+soundbar, not the monitor. That level turns out to be unreadable from every
+Samsung-side source: UPnP RenderingControl `GetVolume`, the `samsungtvws` socket,
+and even the SmartThings cloud `audioVolume` capability all stay decoupled (they
+report the monitor's idle internal volume, not the ARC output). So rather than show
+a number that would be wrong, the HUD is a relative up/down/mute indicator, driven
+directly from the keypress.
 
 ## Install
 
@@ -48,19 +58,25 @@ Two pieces:
 
 This creates a Python venv (+ `samsungtvws`), loads the daemon LaunchAgent, and
 builds, signs, and installs the menu-bar app. Then do the **two one-time manual
-steps** macOS requires:
+steps** macOS requires (the app's menu shows a warning button for each until done):
 
-1. **Grant Accessibility.** System Settings → Privacy & Security → Accessibility →
-   enable **G8 Volume**. The volume-key tap is inert without it. (If macOS also
-   asks for **Input Monitoring**, grant that too.) The app is code-signed with a
-   stable identity, so this grant persists across rebuilds.
+1. **Grant two permissions** in System Settings → Privacy & Security, then relaunch
+   the app:
+   - **Accessibility** → enable **G8 Volume** — lets the app create an event-altering
+     tap (so it can suppress the key's no-op macOS HUD).
+   - **Input Monitoring** → enable **G8 Volume** — lets that tap actually *receive*
+     the key events. **Both are required**; with only Accessibility the tap is
+     created but never sees a keypress.
+
+   The app is code-signed with a stable identity, so these grants persist across
+   rebuilds.
 2. **Pair with the monitor.** With the G8 as your audio output, press a volume key.
    The monitor pops an **"Allow this device?"** dialog — accept it once with the G8
    remote. The token is saved to `~/.config/g8-volume/token.txt` and reused forever.
 
 That's it. With the G8 as output, the volume keys move the monitor (and the
-soundbar over ARC) and show the level HUD. Switch to headphones or another monitor
-and the keys behave normally again; the menu-bar icon dims.
+soundbar over ARC) and show the relative HUD. Switch to headphones or another
+monitor and the keys behave normally again; the menu-bar icon dims.
 
 ## Configuration
 
@@ -78,8 +94,8 @@ Defaults are pinned to this machine's G8 and rarely need changing
 ## Verify
 
 ```
-curl -s 127.0.0.1:8765/status          # {"ok":true,"tv_ip":"192.168.68.69","volume":14,"muted":false}
-curl -s 127.0.0.1:8765/up              # nudges volume up, returns the new level
+curl -s 127.0.0.1:8765/status          # {"ok":true,"tv_ip":"192.168.68.69"}
+curl -s 127.0.0.1:8765/up              # sends KEY_VOLUP to the monitor
 curl  http://192.168.68.69:8001/api/v2/   # the G8's device info (reachability)
 launchctl print gui/$(id -u)/org.hersey.g8-volume | head   # agent state
 tail -f ~/Library/Logs/g8-volume.log
@@ -91,7 +107,7 @@ tail -f ~/Library/Logs/g8-volume.log
 ./priv/launchd/install.sh uninstall                 # stop + remove the daemon
 rm -rf "/Applications/G8 Volume.app"                # remove the app
 # then remove "G8 Volume" from System Settings → Login Items, and revoke its
-# Accessibility grant if you wish. State lives in ~/.config/g8-volume/.
+# Accessibility + Input Monitoring grants if you wish. State lives in ~/.config/g8-volume/.
 ```
 
 ## Notes

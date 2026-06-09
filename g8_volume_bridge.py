@@ -44,8 +44,6 @@ LISTEN     = ("127.0.0.1", 8765)                        # local-only; the app ta
 CONFIG_DIR = os.path.expanduser("~/.config/g8-volume")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token.txt")
 IP_CACHE   = os.path.join(CONFIG_DIR, "last_ip.txt")
-DMR_PORT   = 9197                                       # UPnP MediaRenderer port
-RC_CONTROL = "/upnp/control/RenderingControl1"          # RenderingControl controlURL
 # ---------------------------------------------------------------------------
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -188,80 +186,16 @@ def press(key):
 
 
 # ---------------------------------------------------------------------------
-# UPnP RenderingControl — read the monitor's REAL volume/mute for the HUD.
-# ---------------------------------------------------------------------------
-def _soap(action, body_inner, timeout=2.0):
-    url = f"http://{_tv_ip}:{DMR_PORT}{RC_CONTROL}"
-    envelope = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"'
-        ' s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
-        f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">'
-        f'<InstanceID>0</InstanceID>{body_inner}</u:{action}>'
-        '</s:Body></s:Envelope>'
-    ).encode()
-    req = urllib.request.Request(url, data=envelope, headers={
-        "Content-Type": 'text/xml; charset="utf-8"',
-        "SOAPACTION": f'"urn:schemas-upnp-org:service:RenderingControl:1#{action}"',
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", "replace")
-
-
-def get_volume():
-    try:
-        xml = _soap("GetVolume", "<Channel>Master</Channel>")
-        m = re.search(r"<CurrentVolume>(\d+)</CurrentVolume>", xml)
-        return int(m.group(1)) if m else None
-    except Exception:
-        return None
-
-
-def get_mute():
-    try:
-        xml = _soap("GetMute", "<Channel>Master</Channel>")
-        m = re.search(r"<CurrentMute>([01])</CurrentMute>", xml)
-        return (m.group(1) == "1") if m else None
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Volume model.
+# No volume readback.
 #
-# This monitor's UPnP RenderingControl volume is DECOUPLED from the ARC/soundbar
-# volume that KEY_VOLUP/DOWN actually drive (GetVolume stays pinned regardless),
-# so we can't read the real level. Instead we track it optimistically: ±1 per
-# key, toggle on mute, clamp 0-100. The clamps self-resync at the extremes (hold
-# down to 0 or up to 100 and both our counter and the real volume bottom/top out
-# together). Seeded once from UPnP as a rough starting guess.
+# The keys drive the G8's volume stage, which on this setup passes audio out over
+# ARC to an external (non-Samsung) soundbar via HDMI-CEC. The real level therefore
+# lives in that soundbar, not the monitor — confirmed unreadable from every
+# Samsung-side source (UPnP RenderingControl, the samsungtvws socket, and even the
+# SmartThings cloud audioVolume all stay decoupled/pinned). So the menu-bar app
+# shows a RELATIVE up/down/mute HUD driven straight from the keypress, and the
+# daemon just relays keys. The only state worth reporting is the resolved IP.
 # ---------------------------------------------------------------------------
-_state = {"volume": None, "muted": False}
-
-
-def _seed_state():
-    if _state["volume"] is None:
-        v = get_volume()
-        _state["volume"] = v if v is not None else 50
-        m = get_mute()
-        _state["muted"] = bool(m) if m is not None else False
-
-
-def adjust(cmd):
-    _seed_state()
-    if cmd == "up":
-        _state["muted"] = False                       # Samsung unmutes on volume change
-        _state["volume"] = min(100, _state["volume"] + 1)
-    elif cmd == "down":
-        _state["muted"] = False
-        _state["volume"] = max(0, _state["volume"] - 1)
-    elif cmd == "mute":
-        _state["muted"] = not _state["muted"]
-
-
-def volume_state():
-    _seed_state()
-    return {"volume": _state["volume"], "muted": _state["muted"], "tv_ip": _tv_ip}
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.strip("/").lower()
 
         if path == "status":
-            self._json(200, {"ok": True, **volume_state()})
+            self._json(200, {"ok": True, "tv_ip": _tv_ip})
             return
 
         key = KEYS.get(path)
@@ -295,9 +229,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(502, {"error": str(exc)})
             return
 
-        # Update our optimistic level model and return it for the HUD.
-        adjust(path)
-        self._json(200, volume_state())
+        self._json(200, {"ok": True, "tv_ip": _tv_ip})
 
     def log_message(self, format, *args):   # keep the console quiet
         pass

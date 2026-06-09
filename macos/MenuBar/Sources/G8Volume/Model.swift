@@ -13,8 +13,11 @@ final class StatusModel {
   var daemonOK: Bool = false
   var accessibility: Bool = false   // lets us CREATE an active (suppressing) tap
   var inputMonitoring: Bool = false // lets the tap RECEIVE key/system events
+  var launchAtLogin: Bool = false
   var tvIP: String = "—"
-  var volume: Int = 0
+  // Mute is tracked locally (toggled per mute press, cleared on any volume change),
+  // since the real level/mute isn't readable from the monitor. Best-effort: drifts
+  // only if you also mute with the physical remote.
   var muted: Bool = false
 
   @ObservationIgnored private let keyTap = KeyTap()
@@ -27,8 +30,6 @@ final class StatusModel {
       self?.handleKey(cmd)
     }
     keyTap.start()
-
-    LoginItem.register()
 
     refresh()
     log.notice("perms accessibility=\(self.accessibility) inputMonitoring=\(self.inputMonitoring)")
@@ -50,18 +51,27 @@ final class StatusModel {
     }
   }
 
-  /// A hijacked volume key fired: tell the daemon, then reflect the real level.
+  /// A hijacked volume key fired. Update local mute state, show the HUD instantly
+  /// (no daemon round-trip needed for a relative cue), then relay the key.
   private func handleKey(_ cmd: String) {
-    let name = outputName
+    switch cmd {
+    case "up", "down": muted = false   // Samsung unmutes on any volume change
+    case "mute": muted.toggle()
+    default: break
+    }
+    VolumeHUD.shared.show(action: cmd, muted: muted, device: outputName)
     Task { @MainActor in
       if let reply = await Bridge.send(cmd) {
         daemonOK = true
-        if let v = reply.volume { volume = v }
-        if let m = reply.muted { muted = m }
         if let ip = reply.tv_ip { tvIP = ip }
       }
-      VolumeHUD.shared.show(volume: volume, muted: muted, device: name)
     }
+  }
+
+  /// Toggle launch-at-login from the menu checkbox.
+  func setLaunchAtLogin(_ on: Bool) {
+    LoginItem.setEnabled(on)
+    launchAtLogin = LoginItem.isEnabled
   }
 
   /// Refresh output-device state and poll the daemon's health/level.
@@ -73,13 +83,12 @@ final class StatusModel {
     // takes, so granting the permission "just works" without an app relaunch.
     accessibility = AXIsProcessTrusted()
     inputMonitoring = CGPreflightListenEventAccess()
+    launchAtLogin = LoginItem.isEnabled
     if accessibility { keyTap.start() }
 
     Task { @MainActor in
       if let s = await Bridge.status() {
         daemonOK = s.ok ?? true
-        if let v = s.volume { volume = v }
-        if let m = s.muted { muted = m }
         if let ip = s.tv_ip { tvIP = ip }
       } else {
         daemonOK = false

@@ -4,14 +4,15 @@ import SwiftUI
 /// State backing the floating HUD view.
 @MainActor
 final class HUDState: ObservableObject {
-  @Published var volume: Int = 0
+  @Published var action: String = "up"   // "up" | "down" | "mute"
   @Published var muted: Bool = false
   @Published var device: String = ""
 }
 
-/// Apple-style volume overlay. Because we swallow the media key, macOS draws no
-/// HUD of its own — this is our stand-in, showing the monitor's REAL level (read
-/// back from the daemon over UPnP) on a borderless, non-activating floating panel.
+/// On-screen volume feedback. Because we swallow the media key, macOS draws no HUD
+/// of its own — this is our stand-in. The real (ARC/external-soundbar) level isn't
+/// readable from any Samsung-side API, so this is a RELATIVE indicator: an up/down
+/// chevron per press, or a muted/sound-on state, on a borderless floating panel.
 @MainActor
 final class VolumeHUD {
   static let shared = VolumeHUD()
@@ -21,7 +22,7 @@ final class VolumeHUD {
   private var hideTimer: Timer?
 
   private func makePanel() -> NSPanel {
-    let size = NSSize(width: 260, height: 92)
+    let size = NSSize(width: 240, height: 96)
     let panel = NSPanel(
       contentRect: NSRect(origin: .zero, size: size),
       styleMask: [.borderless, .nonactivatingPanel],
@@ -42,10 +43,10 @@ final class VolumeHUD {
     return panel
   }
 
-  /// Show (or refresh) the HUD with the given level, resetting the fade timer.
-  func show(volume: Int?, muted: Bool?, device: String) {
-    state.volume = max(0, min(100, volume ?? state.volume))
-    state.muted = muted ?? false
+  /// Show (or refresh) the HUD for a keypress, resetting the fade timer.
+  func show(action: String, muted: Bool, device: String) {
+    state.action = action
+    state.muted = muted
     state.device = device
 
     let panel = self.panel ?? makePanel()
@@ -56,7 +57,7 @@ final class VolumeHUD {
     panel.orderFrontRegardless()
 
     hideTimer?.invalidate()
-    hideTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: false) { [weak self] _ in
+    hideTimer = Timer.scheduledTimer(withTimeInterval: 1.1, repeats: false) { [weak self] _ in
       Task { @MainActor in self?.fadeOut() }
     }
   }
@@ -75,59 +76,60 @@ final class VolumeHUD {
   private func reposition(_ panel: NSPanel) {
     guard let screen = NSScreen.main else { return }
     let vf = screen.visibleFrame
-    let w = panel.frame.width
-    let h = panel.frame.height
-    let x = vf.midX - w / 2
-    let y = vf.maxY - h - 12
+    let x = vf.midX - panel.frame.width / 2
+    let y = vf.maxY - panel.frame.height - 12
     panel.setFrameOrigin(NSPoint(x: x, y: y))
   }
 }
 
-/// The HUD's contents: device name, speaker glyph, and a rounded level bar.
+/// The HUD's contents: device name, speaker glyph, and a relative up/down/mute cue.
 private struct HUDView: View {
   @ObservedObject var state: HUDState
 
-  private var symbol: String {
-    if state.muted { return "speaker.slash.fill" }
-    switch state.volume {
-    case 0: return "speaker.fill"
-    case 1..<34: return "speaker.wave.1.fill"
-    case 34..<67: return "speaker.wave.2.fill"
-    default: return "speaker.wave.3.fill"
-    }
+  private var speakerSymbol: String {
+    state.muted ? "speaker.slash.fill" : "speaker.wave.2.fill"
   }
 
   var body: some View {
-    VStack(spacing: 10) {
+    VStack(spacing: 12) {
       Text(state.device.isEmpty ? "Output" : state.device)
         .font(.system(size: 13, weight: .semibold))
         .foregroundStyle(.primary)
         .lineLimit(1)
 
-      HStack(spacing: 12) {
-        Image(systemName: symbol)
-          .font(.system(size: 18))
-          .frame(width: 24)
-          .foregroundStyle(.primary)
+      HStack(spacing: 16) {
+        Image(systemName: speakerSymbol)
+          .font(.system(size: 26))
+          .foregroundStyle(state.muted ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+          .frame(width: 34)
 
-        GeometryReader { geo in
-          ZStack(alignment: .leading) {
-            Capsule().fill(.secondary.opacity(0.25))
-            Capsule()
-              .fill(state.muted ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
-              .frame(width: geo.size.width * CGFloat(state.muted ? 0 : state.volume) / 100)
-          }
-        }
-        .frame(height: 6)
+        cue
       }
     }
-    .padding(.horizontal, 18)
-    .padding(.vertical, 14)
+    .padding(.horizontal, 20)
+    .padding(.vertical, 16)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(
       RoundedRectangle(cornerRadius: 18, style: .continuous)
         .fill(.ultraThinMaterial)
     )
-    .tint(.green)
+  }
+
+  /// Up/down show a green chevron; mute shows the resulting muted/sound-on state.
+  @ViewBuilder private var cue: some View {
+    switch state.action {
+    case "up":
+      Image(systemName: "chevron.up")
+        .font(.system(size: 24, weight: .bold))
+        .foregroundStyle(.green)
+    case "down":
+      Image(systemName: "chevron.down")
+        .font(.system(size: 24, weight: .bold))
+        .foregroundStyle(.green)
+    default:  // mute
+      Text(state.muted ? "Muted" : "Sound on")
+        .font(.system(size: 15, weight: .semibold))
+        .foregroundStyle(.secondary)
+    }
   }
 }

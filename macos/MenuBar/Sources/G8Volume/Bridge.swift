@@ -1,10 +1,9 @@
 import Foundation
 
-/// What the daemon reports back: the monitor's real volume/mute + resolved IP.
+/// What the daemon reports back: health + the resolved monitor IP. (There's no
+/// readable volume on this setup, so the HUD is driven locally from the keypress.)
 struct BridgeReply: Decodable {
   var ok: Bool?
-  var volume: Int?
-  var muted: Bool?
   var tv_ip: String?
 }
 

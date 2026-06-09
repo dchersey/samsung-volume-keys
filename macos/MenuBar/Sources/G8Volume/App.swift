@@ -49,7 +49,7 @@ private struct MenuView: View {
       Group {
         Text("Output: \(model.outputName)")
         Text("Daemon: \(model.daemonOK ? "ok" : "down") (tv \(model.tvIP))")
-        Text("Volume: \(model.muted ? "muted" : "\(model.volume)")")
+        if model.muted { Text("Muted") }
       }
       .font(.system(size: 12))
       .foregroundStyle(.secondary)
@@ -66,6 +66,12 @@ private struct MenuView: View {
       }
 
       Divider()
+
+      Toggle("Launch at Login", isOn: Binding(
+        get: { model.launchAtLogin },
+        set: { model.setLaunchAtLogin($0) }))
+        .toggleStyle(.checkbox)
+        .font(.system(size: 13))
 
       Button("Restart daemon") { Bridge.restartDaemon() }
         .buttonStyle(.plain)
