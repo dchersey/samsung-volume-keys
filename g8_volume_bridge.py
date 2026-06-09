@@ -239,12 +239,15 @@ def _keepalive_loop():
         time.sleep(KEEPALIVE_SECS)
 
 
-def press(key):
-    """Send one key over the warm socket, forcing a fresh reconnect if it just died."""
+def press(key, cmd="Click"):
+    """Send one remote command over the warm socket, reconnecting if it just died.
+
+    cmd is "Click" (one step), "Press" (start a native hold-to-ramp) or "Release".
+    """
     global tv
     with _lock:
         try:
-            _ensure_connection().send_key(key, key_press_delay=0)
+            _ensure_connection().send_key(key, key_press_delay=0, cmd=cmd)
         except Exception:
             try:
                 if tv is not None:
@@ -252,7 +255,7 @@ def press(key):
             except Exception:
                 pass
             tv = None
-            _ensure_connection().send_key(key, key_press_delay=0)
+            _ensure_connection().send_key(key, key_press_delay=0, cmd=cmd)
 
 
 # ---------------------------------------------------------------------------
@@ -290,13 +293,20 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "tv_ip": _tv_ip})
             return
 
-        key = KEYS.get(path)
+        # "up"/"down"/"mute" → a single Click; "press/up" or "release/down" →
+        # start/stop a native hold-to-ramp on the monitor.
+        parts = path.split("/")
+        cmd, name = "Click", parts[0]
+        if len(parts) == 2 and parts[0] in ("press", "release"):
+            cmd, name = parts[0].capitalize(), parts[1]
+
+        key = KEYS.get(name)
         if key is None:
             self._json(404, {"error": "unknown command"})
             return
 
         try:
-            press(key)
+            press(key, cmd)
         except Exception as exc:
             self.log_error("send failed: %s", exc)
             self._json(502, {"error": str(exc)})

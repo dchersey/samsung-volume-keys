@@ -39,6 +39,10 @@ scale preserved, works the same whether ARC is carrying PCM or Dolby.
   like the system one. (Why relative and not a 0–100 bar?
   [See below](#why-the-hud-is-relative) — the short version is that the real level
   lives in an external soundbar nothing on the network can read.)
+- **Hold to ramp.** Holding a volume key sends the monitor one *Press* and, on
+  release, one *Release* — so the G8 runs its own native volume ramp and stops the
+  instant you let go. No flooding the TV with one keypress per step (which would
+  back up and keep getting louder after release).
 - **Lives in the menu bar, not the Dock.** The icon goes green when the G8 is the
   active output (keys are being hijacked) and dim otherwise. The menu shows the
   output device, daemon health, mute state, and a **Launch at Login** toggle.
@@ -160,9 +164,10 @@ rm -rf "/Applications/G8 Volume.app"         # remove the app
 - The HTTP listener binds to `127.0.0.1` only — nothing off-box can reach it.
 - `key_press_delay` is forced to `0` (the library default of 1.5s would make volume
   crawl).
-- **Hold-to-ramp:** the tap steps once per key event and relies on macOS
-  auto-repeating a held volume key. If a held key only steps once on your setup, add
-  a `Timer`-driven repeat in `KeyTap.swift` on key-down / cancel on key-up.
+- **Hold-to-ramp** uses the monitor's native `Press`/`Release` (one of each per
+  hold), so the ramp speed and stop are the G8's own — there's an inherent ~one
+  round-trip of latency, same as a single press. A watchdog releases automatically
+  if a key-up is ever missed (e.g. you switch outputs mid-hold).
 
 ## License
 

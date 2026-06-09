@@ -19,8 +19,9 @@ private let NX_KEYTYPE_MUTE = 7
 /// which is why the C trampoline can use `MainActor.assumeIsolated`.
 @MainActor
 final class KeyTap {
-  /// Called when the G8 is the active output and a volume key went down.
-  var onTrigger: ((String) -> Void)?
+  /// Called when the G8 is the active output and a volume key changed state.
+  /// (command "up"/"down"/"mute", isDown = true on press / false on release).
+  var onTrigger: ((String, Bool) -> Void)?
 
   private var tap: CFMachPort?
   private var runLoopSource: CFRunLoopSource?
@@ -58,7 +59,7 @@ final class KeyTap {
     if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
   }
 
-  func fire(_ cmd: String) { onTrigger?(cmd) }
+  func fire(_ cmd: String, _ isDown: Bool) { onTrigger?(cmd, isDown) }
 }
 
 /// Maps a media-key code to a daemon command, or nil if we don't handle it.
@@ -97,14 +98,18 @@ private func keyTapCallback(
   let data1 = ns.data1
   let keyCode = (data1 & 0xFFFF_0000) >> 16
   let keyState = (data1 & 0x0000_FF00) >> 8
-  let isDown = keyState == 0x0A
 
-  guard command(for: keyCode) != nil else { return passthrough }     // not a key we handle
+  guard let cmd = command(for: keyCode) else { return passthrough }   // not a key we handle
   // Gate on the output device FIRST: when the G8 isn't active, pass BOTH key-down
   // and key-up straight through so native macOS volume (e.g. AirPods) works.
   guard Audio.defaultOutputIsG8() else { return passthrough }
-  guard isDown, let cmd = command(for: keyCode) else { return nil }   // on G8: swallow our key-up
 
-  MainActor.assumeIsolated { me.fire(cmd) }
+  // On G8: report press (0x0A, incl. auto-repeats) and release (0x0B), swallowing
+  // both so macOS draws no HUD. The model maps these to Press/Release.
+  if keyState == 0x0A {
+    MainActor.assumeIsolated { me.fire(cmd, true) }
+  } else if keyState == 0x0B {
+    MainActor.assumeIsolated { me.fire(cmd, false) }
+  }
   return nil  // swallow — we handled it
 }

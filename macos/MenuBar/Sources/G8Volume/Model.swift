@@ -26,8 +26,8 @@ final class StatusModel {
   init() {
     requestPermissions()
 
-    keyTap.onTrigger = { [weak self] cmd in
-      self?.handleKey(cmd)
+    keyTap.onTrigger = { [weak self] cmd, isDown in
+      self?.onKey(cmd, isDown: isDown)
     }
     keyTap.start()
 
@@ -51,20 +51,66 @@ final class StatusModel {
     }
   }
 
-  /// A hijacked volume key fired. Update local mute state, show the HUD instantly
-  /// (no daemon round-trip needed for a relative cue), then relay the key.
-  private func handleKey(_ cmd: String) {
-    switch cmd {
-    case "up", "down": muted = false   // Samsung unmutes on any volume change
-    case "mute": muted.toggle()
-    default: break
+  // Hold-to-ramp via the monitor's native Press/Release: one Press on key-down, one
+  // Release on key-up. The G8 ramps itself and stops exactly on release — no per-step
+  // flooding and no backlog to unwind. Auto-repeat key-downs are ignored (the TV is
+  // already ramping). A watchdog, re-armed by those repeats, releases everything if a
+  // key-up is ever missed (e.g. the output switched mid-hold).
+  @ObservationIgnored private var heldDirs: Set<String> = []   // "up"/"down" held now
+  @ObservationIgnored private var muteHeld = false
+  @ObservationIgnored private var holdWatchdog: Timer?
+  @ObservationIgnored private var sendChain: Task<Void, Never> = Task {}
+
+  /// A hijacked volume key changed state (isDown: true = press, false = release).
+  private func onKey(_ cmd: String, isDown: Bool) {
+    if cmd == "mute" {                       // a toggle, not a hold → single Click on press
+      if !isDown { muteHeld = false; return }
+      if muteHeld { return }                 // ignore auto-repeat
+      muteHeld = true
+      muted.toggle()
+      VolumeHUD.shared.show(action: "mute", muted: muted, device: outputName)
+      enqueueSend("mute")
+      return
     }
-    VolumeHUD.shared.show(action: cmd, muted: muted, device: outputName)
-    Task { @MainActor in
-      if let reply = await Bridge.send(cmd) {
-        daemonOK = true
-        if let ip = reply.tv_ip { tvIP = ip }
+
+    // up / down → Press on the first key-down, Release on key-up.
+    if isDown {
+      VolumeHUD.shared.show(action: cmd, muted: false, device: outputName)
+      armWatchdog()
+      if heldDirs.insert(cmd).inserted {     // first press → start the native ramp
+        muted = false
+        enqueueSend("press/\(cmd)")
+      }                                      // repeats: just keep the HUD + watchdog alive
+    } else {
+      if heldDirs.remove(cmd) != nil {
+        enqueueSend("release/\(cmd)")
       }
+      if heldDirs.isEmpty { holdWatchdog?.invalidate(); holdWatchdog = nil }
+    }
+  }
+
+  /// Safety net for a missed key-up: genuine holds keep re-arming this via auto-repeat,
+  /// so it only fires once events stop — then it releases whatever is still held.
+  private func armWatchdog() {
+    holdWatchdog?.invalidate()
+    holdWatchdog = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+      Task { @MainActor in self?.releaseAllHeld() }
+    }
+  }
+
+  private func releaseAllHeld() {
+    for dir in heldDirs { enqueueSend("release/\(dir)") }
+    heldDirs.removeAll()
+    holdWatchdog?.invalidate()
+    holdWatchdog = nil
+  }
+
+  /// Serialize sends so a Press always reaches the daemon before its Release.
+  private func enqueueSend(_ path: String) {
+    let prev = sendChain
+    sendChain = Task { @MainActor in
+      _ = await prev.value
+      if await Bridge.send(path) != nil { daemonOK = true }
     }
   }
 
