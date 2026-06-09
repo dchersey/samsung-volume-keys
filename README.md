@@ -87,18 +87,30 @@ Two pieces, talking over localhost:
 
 ## Install
 
+Apple Silicon, macOS 14+, and Homebrew Python.
+
+### Download (prebuilt, no Xcode)
+
+Installs the **signed & notarized** app plus the background daemon:
+
+```
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/dchersey/samsung-volume-keys/main/install.sh)"
+```
+
+### From source
+
+Builds and signs the app locally (needs the Swift toolchain — Xcode or the Command
+Line Tools):
+
 ```
 git clone https://github.com/dchersey/samsung-volume-keys.git
 cd samsung-volume-keys
 ./install.sh
 ```
 
-`install.sh` creates a Python venv (+ `samsungtvws`), loads the daemon LaunchAgent,
-and builds, signs, and installs the menu-bar app. It needs the Swift toolchain
-(Xcode or the Command Line Tools) and Homebrew Python.
-
-Then do the **two one-time manual steps** macOS requires — the app's menu shows a
-warning button for each until it's done:
+Either way, `install.sh` sets up a Python venv (+ `samsungtvws`), installs the
+menu-bar app, and loads the daemon LaunchAgent. Then do the **two one-time manual
+steps** macOS requires — the app's menu shows a warning button for each until done:
 
 1. **Grant two permissions** in System Settings → Privacy & Security, then relaunch
    the app:
