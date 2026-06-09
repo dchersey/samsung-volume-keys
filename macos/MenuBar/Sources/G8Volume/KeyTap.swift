@@ -99,11 +99,11 @@ private func keyTapCallback(
   let keyState = (data1 & 0x0000_FF00) >> 8
   let isDown = keyState == 0x0A
 
-  guard let cmd = command(for: keyCode) else { return passthrough }  // not our key
-  let onG8 = Audio.defaultOutputIsG8()
-  log.notice("media key=\(keyCode) down=\(isDown) onG8=\(onG8) -> \(onG8 ? "HIJACK" : "passthrough")")
-  guard isDown else { return nil }                                    // swallow our key-up
-  guard onG8 else { return passthrough }                             // not on G8 → native
+  guard command(for: keyCode) != nil else { return passthrough }     // not a key we handle
+  // Gate on the output device FIRST: when the G8 isn't active, pass BOTH key-down
+  // and key-up straight through so native macOS volume (e.g. AirPods) works.
+  guard Audio.defaultOutputIsG8() else { return passthrough }
+  guard isDown, let cmd = command(for: keyCode) else { return nil }   // on G8: swallow our key-up
 
   MainActor.assumeIsolated { me.fire(cmd) }
   return nil  // swallow — we handled it
