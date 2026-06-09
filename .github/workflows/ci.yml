@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  daemon:
+    name: Daemon (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt
+      # Syntax-check only — importing the module would kick off network discovery.
+      - run: python -m py_compile g8_volume_bridge.py
+
+  app:
+    name: Menu-bar app (Swift)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - run: swift --version
+      - working-directory: macos/MenuBar
+        run: swift build -c release

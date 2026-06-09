@@ -1,5 +1,6 @@
 # G8 Volume
 
+[![CI](https://github.com/dchersey/samsung-volume-keys/actions/workflows/ci.yml/badge.svg)](https://github.com/dchersey/samsung-volume-keys/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform: macOS 14+](https://img.shields.io/badge/Platform-macOS%2014%2B-black.svg)
 
