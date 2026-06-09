@@ -1,0 +1,12 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Swift / build artifacts
+macos/MenuBar/.build/
+*.app
+
+# Local state (lives in ~/.config/g8-volume, never here — but just in case)
+token.txt
+last_ip.txt
