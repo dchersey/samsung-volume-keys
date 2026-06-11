@@ -180,6 +180,14 @@ rm -rf "/Applications/G8 Volume.app"         # remove the app
   hold), so the ramp speed and stop are the G8's own — there's an inherent ~one
   round-trip of latency, same as a single press. A watchdog releases automatically
   if a key-up is ever missed (e.g. you switch outputs mid-hold).
+- **Wake / long idle.** After a long idle (especially system sleep) the monitor and
+  its Wi-Fi drop the WebSocket while the daemon's reader/keepalive threads are
+  suspended, leaving a "half-open" socket that looks alive but isn't — historically
+  the first press then stalled for seconds while TCP timed out. The daemon now treats
+  a connection with no activity for `STALE_AFTER` (120s) as suspect and reconnects
+  *before* sending, detects the wall-clock jump from sleep, and exposes `/warm`; the
+  menu-bar app pings `/warm` on system wake, display wake, and when the G8 becomes
+  the active output, so the (re)connect starts before you reach for the keys.
 
 ## License
 

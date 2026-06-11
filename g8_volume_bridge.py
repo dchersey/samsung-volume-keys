@@ -45,7 +45,8 @@ LISTEN     = ("127.0.0.1", 8765)                        # local-only; the app ta
 CONFIG_DIR = os.path.expanduser("~/.config/g8-volume")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token.txt")
 IP_CACHE   = os.path.join(CONFIG_DIR, "last_ip.txt")
-KEEPALIVE_SECS = 30                                     # reconnect cadence to stay warm
+KEEPALIVE_SECS = 25                                     # keepalive / sleep-check cadence
+STALE_AFTER    = 120                                    # idle secs before we distrust the socket
 # ---------------------------------------------------------------------------
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -165,16 +166,25 @@ def discover_tv(force=False):
 # ---------------------------------------------------------------------------
 # Persistent, warm samsungtvws connection.
 #
-# The library connects lazily and never pings, and the TV idle-closes the remote
-# socket after a while — so a cold first press lagged on the TLS+token handshake,
-# and the first press after an idle-close was silently dropped (sent into a
-# half-closed socket the library hadn't noticed). Instead we keep ONE warm
-# connection: open eagerly, run a reader thread so a TV-side close flips
-# is_alive() at once, and a keepalive thread that reconnects in the background so
-# presses stay instant. discover_tv() re-resolves the IP whenever a reconnect fails.
+# We keep ONE warm connection so presses are instant: open eagerly, run a reader
+# thread so a TV-side close flips is_alive() at once, and a keepalive thread that
+# reconnects in the background. discover_tv() re-resolves the IP if a reconnect fails.
+#
+# The hard case is waking from a long system sleep: the reader/keepalive threads are
+# suspended, the TV (and its Wi-Fi) drop the socket, and on wake the socket is
+# "half-open" — is_alive() still reports True, so the first press would send into a
+# dead socket and only fail after a multi-second TCP timeout. Guards for that:
+#   • time-based staleness — if the connection has had no successful activity for
+#     STALE_AFTER seconds (a long sleep guarantees this via wall-clock), reconnect
+#     proactively BEFORE sending instead of discovering the death the slow way.
+#   • sleep-gap detection — the keepalive notices the wall-clock jump and warms.
+#   • /warm — the menu-bar app pings it on wake, so warming starts before you even
+#     reach for the volume key; a bounded retry loop covers a still-waking monitor.
 # ---------------------------------------------------------------------------
 _tv_ip = discover_tv()
 tv = None
+_last_activity = 0.0          # wall-clock time of the last successful connect/send
+_warming = threading.Event()  # set while a background warm-retry loop is running
 
 
 def _new_tv(ip):
@@ -196,20 +206,19 @@ def _listen(conn):
 
 def _connect():
     """Open a fresh warm connection (+ reader) to _tv_ip. Raises if unreachable."""
-    global tv
+    global tv, _last_activity
     t = _new_tv(_tv_ip)
     t.open()                      # TLS + token handshake (the slow part) up front
     t.connection.settimeout(None)  # but the reader must block indefinitely, not time out
     threading.Thread(target=_listen, args=(t.connection,), daemon=True).start()
     tv = t
+    _last_activity = time.time()
     return t
 
 
-def _ensure_connection():
-    """Return a live connection, reconnecting (and re-discovering the IP) if needed."""
+def force_reconnect():
+    """Drop any existing socket and build a fresh one (re-discovering the IP if needed)."""
     global tv, _tv_ip
-    if tv is not None and tv.is_alive():
-        return tv
     try:
         if tv is not None:
             tv.close()
@@ -223,8 +232,18 @@ def _ensure_connection():
         return _connect()
 
 
+def _is_fresh():
+    """Live AND recently active — so we trust it without a slow round-trip probe."""
+    return tv is not None and tv.is_alive() and (time.time() - _last_activity) < STALE_AFTER
+
+
+def _ensure_connection():
+    """Return a connection that's live and recently active, reconnecting otherwise."""
+    return tv if _is_fresh() else force_reconnect()
+
+
 def _warm():
-    """Best-effort: ensure the connection is up (startup + keepalive + reader use this)."""
+    """Best-effort: ensure the connection is up (reader/keepalive use this)."""
     try:
         with _lock:
             _ensure_connection()
@@ -232,30 +251,51 @@ def _warm():
         pass
 
 
+def _warm_retry_loop():
+    """Keep (re)establishing the connection for a while — used on wake, when the
+    monitor's Wi-Fi may still be reassociating and the first attempt can fail."""
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            _warm()
+            if _is_fresh():
+                return
+            time.sleep(2)
+    finally:
+        _warming.clear()
+
+
+def request_warm():
+    """Kick a single background warm-retry loop (no-op if one is already running)."""
+    if not _warming.is_set():
+        _warming.set()
+        threading.Thread(target=_warm_retry_loop, daemon=True).start()
+
+
 def _keepalive_loop():
-    """Keep the socket warm so presses never pay a reconnect (or drop a press)."""
+    """Keep the socket warm, and force a reconnect after a system-sleep gap."""
+    last = time.time()
+    _warm()                                          # eager connect at startup
     while True:
-        _warm()
         time.sleep(KEEPALIVE_SECS)
+        now = time.time()
+        slept = (now - last) > KEEPALIVE_SECS * 2    # wall-clock jump ⇒ we were suspended
+        last = now
+        request_warm() if slept else _warm()
 
 
 def press(key, cmd="Click"):
-    """Send one remote command over the warm socket, reconnecting if it just died.
+    """Send one remote command over the warm socket, reconnecting if it's stale/dead.
 
     cmd is "Click" (one step), "Press" (start a native hold-to-ramp) or "Release".
     """
-    global tv
+    global _last_activity
     with _lock:
         try:
             _ensure_connection().send_key(key, key_press_delay=0, cmd=cmd)
         except Exception:
-            try:
-                if tv is not None:
-                    tv.close()
-            except Exception:
-                pass
-            tv = None
-            _ensure_connection().send_key(key, key_press_delay=0, cmd=cmd)
+            force_reconnect().send_key(key, key_press_delay=0, cmd=cmd)
+        _last_activity = time.time()
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +330,13 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.strip("/").lower()
 
         if path == "status":
+            self._json(200, {"ok": True, "tv_ip": _tv_ip})
+            return
+
+        if path == "warm":
+            # The app pings this on wake / output-change so the (re)connect starts
+            # before the first keypress. Returns immediately; warming runs in back.
+            request_warm()
             self._json(200, {"ok": True, "tv_ip": _tv_ip})
             return
 

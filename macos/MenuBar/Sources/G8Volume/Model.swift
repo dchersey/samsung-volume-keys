@@ -31,7 +31,10 @@ final class StatusModel {
     }
     keyTap.start()
 
+    registerWakeObservers()
+
     refresh()
+    warmDaemon()   // warm the connection at launch, too
     log.notice("perms accessibility=\(self.accessibility) inputMonitoring=\(self.inputMonitoring)")
     timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
       Task { @MainActor in self?.refresh() }
@@ -114,6 +117,23 @@ final class StatusModel {
     }
   }
 
+  /// Ask the daemon to (re)establish its monitor connection now, so the first
+  /// keypress after an idle period / sleep doesn't pay a cold reconnect.
+  func warmDaemon() {
+    Task { await Bridge.warm() }
+  }
+
+  /// Warm proactively when the Mac (or its display) wakes — that's when the daemon's
+  /// socket is half-open and a first press would otherwise stall for seconds.
+  private func registerWakeObservers() {
+    let nc = NSWorkspace.shared.notificationCenter
+    for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+      nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.warmDaemon() }
+      }
+    }
+  }
+
   /// Toggle launch-at-login from the menu checkbox.
   func setLaunchAtLogin(_ on: Bool) {
     LoginItem.setEnabled(on)
@@ -122,8 +142,10 @@ final class StatusModel {
 
   /// Refresh output-device state and poll the daemon's health/level.
   func refresh() {
+    let wasG8 = isG8
     outputName = Audio.defaultOutputDeviceName() ?? "—"
     isG8 = Audio.defaultOutputIsG8()
+    if isG8 && !wasG8 { warmDaemon() }   // just became the active output → warm ahead of use
 
     // The tap can only be created once Accessibility is granted; retry until it
     // takes, so granting the permission "just works" without an app relaunch.

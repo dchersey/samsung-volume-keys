@@ -19,9 +19,15 @@ enum Bridge {
     await get(cmd)
   }
 
-  /// Poll the daemon's health + current volume without changing anything.
+  /// Poll the daemon's health without changing anything.
   static func status() async -> BridgeReply? {
     await get("status")
+  }
+
+  /// Ask the daemon to (re)establish its monitor connection now — fired on system
+  /// wake / output-change so the first keypress doesn't pay a cold reconnect.
+  static func warm() async {
+    _ = await get("warm")
   }
 
   private static func get(_ path: String) async -> BridgeReply? {
