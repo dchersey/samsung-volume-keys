@@ -222,7 +222,7 @@ rm -rf "$HOME/Library/Application Support/g8-volume"  # venv + token + ip cache
 
 ## Why this license?
 
-Samsung Volume Keys is free to use, modify, and share for any **noncommercial** purpose —
+G8 Volume is free to use, modify, and share for any **noncommercial** purpose —
 personal use, hobby projects, tinkering, learning, and contributions back are all
 welcome and always will be. The one thing the license doesn't permit is **selling**
 the software (or charging for hosting/support whose value comes mainly from it).
