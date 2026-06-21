@@ -59,7 +59,7 @@ final class VolumeHUD {
     state.device = device
     switch hint {
     case "local_network":
-      state.errorTitle = "Allow “Python” local network access"
+      state.errorTitle = "Allow “G8 Volume” local network access"
       state.errorDetail = "Settings ▸ Privacy & Security ▸ Local Network"
     case "daemon":
       state.errorTitle = "Volume bridge isn’t running"

@@ -21,10 +21,16 @@ final class StatusModel {
   var muted: Bool = false
 
   @ObservationIgnored private let keyTap = KeyTap()
+  @ObservationIgnored private let daemon = DaemonManager()
   @ObservationIgnored private var timer: Timer?
 
   init() {
     requestPermissions()
+
+    // Spawn the daemon as our child so its Local Network access is attributed to this
+    // signed app (survives Python upgrades). Its first monitor connection triggers the
+    // one-time "G8 Volume wants to access your local network" prompt.
+    daemon.start()
 
     keyTap.onTrigger = { [weak self] cmd, isDown in
       self?.onKey(cmd, isDown: isDown)
@@ -32,6 +38,11 @@ final class StatusModel {
     keyTap.start()
 
     registerWakeObservers()
+    NotificationCenter.default.addObserver(
+      forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated { self?.daemon.stop() }   // don't orphan the daemon on quit
+    }
 
     refresh()
     warmDaemon()   // warm the connection at launch, too
@@ -144,6 +155,11 @@ final class StatusModel {
         MainActor.assumeIsolated { self?.warmDaemon() }
       }
     }
+  }
+
+  /// Restart the daemon child (menu action).
+  func restartDaemon() {
+    daemon.restart()
   }
 
   /// Toggle launch-at-login from the menu checkbox.

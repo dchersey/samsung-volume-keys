@@ -12,7 +12,6 @@ struct BridgeReply: Decodable {
 /// Talks to the local Python daemon (g8_volume_bridge.py) on 127.0.0.1:8765.
 enum Bridge {
   static let base = "http://127.0.0.1:8765"
-  static let label = "org.hersey.g8-volume"
 
   /// Fire a volume command and decode the monitor's resulting state.
   /// One of "up", "down", "mute".
@@ -48,14 +47,5 @@ enum Bridge {
     } catch {
       return nil
     }
-  }
-
-  /// Bounce the daemon LaunchAgent (menu action) via launchctl kickstart -k.
-  static func restartDaemon() {
-    let uid = getuid()
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    p.arguments = ["kickstart", "-k", "gui/\(uid)/\(label)"]
-    try? p.run()
   }
 }

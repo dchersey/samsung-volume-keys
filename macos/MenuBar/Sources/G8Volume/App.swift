@@ -73,7 +73,7 @@ private struct MenuView: View {
         .toggleStyle(.checkbox)
         .font(.system(size: 13))
 
-      Button("Restart daemon") { Bridge.restartDaemon() }
+      Button("Restart daemon") { model.restartDaemon() }
         .buttonStyle(.plain)
       Button("Quit") { NSApp.terminate(nil) }
         .buttonStyle(.plain)

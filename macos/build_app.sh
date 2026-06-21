@@ -18,6 +18,15 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 cp ".build/release/G8Volume" "$app/Contents/MacOS/G8Volume"
 
+# Bundle the daemon INSIDE the app, so the app spawns it as a child and macOS
+# attributes its Local Network access to this signed app (not the churning Python
+# binary). The venv/token/cache live in ~/Library/Application Support/g8-volume.
+repo="$(cd "$here/.." && pwd)"
+mkdir -p "$app/Contents/Resources/daemon"
+cp "$repo/g8_volume_bridge.py" "$repo/requirements.txt" "$repo/boot.sh" \
+   "$app/Contents/Resources/daemon/"
+chmod +x "$app/Contents/Resources/daemon/boot.sh"
+
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

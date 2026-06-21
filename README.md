@@ -46,24 +46,27 @@ scale preserved, works the same whether ARC is carrying PCM or Dolby.
 - **Lives in the menu bar, not the Dock.** The icon goes green when the G8 is the
   active output (keys are being hijacked) and dim otherwise. The menu shows the
   output device, daemon health, mute state, and a **Launch at Login** toggle.
-- **Just runs.** A tiny background daemon autostarts at login, holds one persistent
-  connection to the monitor, reconnects itself if the monitor sleeps, and even
-  **re-finds the monitor by its Wi-Fi MAC** if DHCP moves its IP.
+- **Just runs.** The app spawns the daemon at login and supervises it; the daemon
+  holds one persistent connection to the monitor, reconnects itself if it sleeps,
+  and **re-finds the monitor in the ARP cache** if DHCP moves its IP.
 
 ## How it works
 
-Two pieces, talking over localhost:
+Two pieces, talking over localhost — but **one app**: the daemon ships inside the
+app bundle and the app spawns it as a **child process** (see "Why the app owns the
+daemon" below).
 
 - A **code-signed SwiftUI menu-bar app** (`macos/MenuBar`). It taps the keyboard's
   media keys with a HID-level `CGEventTap`, checks the current output device via
   CoreAudio, and — only when that's the G8 — swallows the key and pings the daemon.
   Code-signed with a stable identity so the macOS permission grants survive rebuilds.
-- A **small always-on Python daemon** (`g8_volume_bridge.py`, run as a LaunchAgent).
-  It holds one persistent [`samsungtvws`](https://pypi.org/project/samsungtvws/)
-  WebSocket to the monitor and turns `http://127.0.0.1:8765/up|down|mute` into
-  `KEY_VOLUP` / `KEY_VOLDOWN` / `KEY_MUTE`. A daemon (rather than a script per
-  keypress) keeps a single warm connection, so fast key-repeats stay smooth and
-  there's no per-press handshake.
+- A **small Python daemon** (`g8_volume_bridge.py`, bundled at
+  `Contents/Resources/daemon/`, run via `boot.sh` in a venv under
+  `~/Library/Application Support/g8-volume/`). It holds one persistent
+  [`samsungtvws`](https://pypi.org/project/samsungtvws/) WebSocket to the monitor and
+  turns `http://127.0.0.1:8765/up|down|mute|press/…|release/…` into the matching
+  remote keys. A persistent daemon (rather than a script per keypress) keeps one warm
+  connection, so key-repeats stay smooth and there's no per-press handshake.
 
 ```
  ┌───────────────────────────────────────────────┐
@@ -73,17 +76,28 @@ Two pieces, talking over localhost:
  │  • CoreAudio: is the G8 the active output?      │
  │      yes → swallow key + ping daemon + show HUD │
  │      no  → pass event through (native keys)     │
+ │  • spawns + supervises the daemon as a child    │
  └───────────────┬─────────────────────────────────┘
-        HTTP GET │ /up|down|mute   (relative HUD shown locally)
-                 ▼ 127.0.0.1:8765
+        HTTP GET │ /up|down|mute|press·release   (HUD shown locally)
+                 ▼ 127.0.0.1:8765   (child process → Local Network grant = the app)
  ┌───────────────────────────────────────────────┐
- │  g8_volume_bridge.py (venv, LaunchAgent)        │
+ │  g8_volume_bridge.py (bundled, venv)            │
  │  • persistent samsungtvws WebSocket → G8 :8002  │
- │  • discover_tv(): cache → TV_IP → MAC scan      │
+ │  • discover_tv(): ARP cache (tracks DHCP)       │
  └──────┬─────────────────────────────────────────┘
    wss  │ :8002 (token, self-signed TLS)
         ▼  KEY_VOLUP/DOWN/MUTE → G8 volume stage → soundbar over ARC
 ```
+
+## Why the app owns the daemon
+
+macOS 15+ **Local Network privacy** gates LAN connections on the *responsible*
+process. A standalone launchd daemon is responsible for itself — the Python binary —
+so a venv rebuilt against a new interpreter (after a Homebrew Python upgrade) is a
+*new binary that silently loses the grant*, and the keys quietly stop working. By
+bundling the daemon and spawning it as a **child of the signed app**, its LAN access
+is attributed to **G8 Volume**'s stable code signature: you grant it once and it
+survives Python upgrades. (This is also why there's no LaunchAgent.)
 
 ## Install
 
@@ -119,12 +133,12 @@ steps** macOS requires — the app's HUD/menu point you at each:
    - **Input Monitoring** → enable **G8 Volume** — lets that tap actually *receive*
      the key events. **Both are required**; with only Accessibility the tap is
      created but never sees a keypress.
-2. **Grant the daemon Local Network access.** System Settings → Privacy & Security →
-   **Local Network** → enable **Python**. macOS 15+ blocks LAN connections by
+2. **Grant Local Network access.** System Settings → Privacy & Security →
+   **Local Network** → enable **G8 Volume**. macOS 15+ blocks LAN connections by
    default, so without this the daemon can't reach the monitor (the keys do nothing).
-   If a key ever stops working, the on-screen HUD will say *"Allow Python local
-   network access"* — this is the toggle it means. (A Homebrew Python upgrade can
-   reset it, since the rebuilt venv is a new binary.)
+   The daemon runs as a child of the signed app, so this grant attaches to **G8
+   Volume** and survives Python upgrades. If a key ever stops working, the on-screen
+   HUD says exactly which toggle it needs.
 3. **Pair with the monitor.** With the G8 as your audio output, press a volume key.
    The monitor pops an **"Allow this device?"** dialog — accept it once with the G8
    remote. The token is saved to `~/.config/g8-volume/token.txt` and reused forever.
@@ -163,18 +177,18 @@ pressing the buttons on a remote.)
 curl -s 127.0.0.1:8765/status                # {"ok":true,"tv_ip":"..."}
 curl -s 127.0.0.1:8765/up                    # sends KEY_VOLUP to the monitor
 curl  http://<TV_IP>:8001/api/v2/            # the G8's device info (reachability)
-launchctl print gui/$(id -u)/org.hersey.g8-volume | head
+pgrep -lf g8_volume_bridge.py                # the daemon (a child of the app)
 tail -f ~/Library/Logs/g8-volume.log
 ```
 
 ## Uninstall
 
 ```
-./priv/launchd/install.sh uninstall          # stop + remove the daemon
-rm -rf "/Applications/G8 Volume.app"         # remove the app
-# then remove "G8 Volume" from System Settings → Login Items, and revoke its
-# Accessibility + Input Monitoring grants if you wish. State lives in
-# ~/.config/g8-volume/.
+# Quit "G8 Volume" (its menu → Quit) — that stops the daemon too — then:
+rm -rf "/Applications/G8 Volume.app"                 # the app (carries the daemon)
+rm -rf "$HOME/Library/Application Support/g8-volume"  # venv + token + ip cache
+# Then remove "G8 Volume" from System Settings → Login Items, and revoke its
+# Accessibility / Input Monitoring / Local Network grants if you wish.
 ```
 
 ## Notes
@@ -194,11 +208,12 @@ rm -rf "/Applications/G8 Volume.app"         # remove the app
   *before* sending, detects the wall-clock jump from sleep, and exposes `/warm`; the
   menu-bar app pings `/warm` on system wake, display wake, and when the G8 becomes
   the active output, so the (re)connect starts before you reach for the keys.
-- **Self-healing venv.** The LaunchAgent runs `boot.sh`, which rebuilds the venv if
-  its Python is missing (e.g. a Homebrew `python@3.13 → 3.14` upgrade deletes the
+- **Self-healing venv.** The app runs `boot.sh`, which rebuilds the venv if its
+  Python is missing (e.g. a Homebrew `python@3.13 → 3.14` upgrade deletes the
   interpreter the venv pointed at) before launching the daemon — so a `brew upgrade`
-  doesn't brick the bridge. (The rebuilt Python is a new binary, so you may need to
-  re-allow it in Local Network — the HUD will say so.)
+  doesn't brick the bridge. Because the daemon is a child of the signed app, the
+  Local Network grant rides on **G8 Volume**, not the rebuilt Python binary, so it
+  survives the upgrade.
 - **Flaky Wi-Fi / DHCP churn.** Discovery is ARP-first (instant, tracks IP changes
   with no ping sweep), reconnects are bounded, and a press that can't reach the
   monitor **fails fast with an on-screen error** instead of hanging. Pin a **DHCP
