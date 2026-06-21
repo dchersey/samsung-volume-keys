@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Docs & usage
+    url: https://github.com/dchersey/samsung-volume-keys#readme
+    about: Setup and usage are covered in the README.
