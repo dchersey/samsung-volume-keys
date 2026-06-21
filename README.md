@@ -1,7 +1,7 @@
 # G8 Volume
 
 [![CI](https://github.com/dchersey/samsung-volume-keys/actions/workflows/ci.yml/badge.svg)](https://github.com/dchersey/samsung-volume-keys/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Source Available](https://img.shields.io/badge/license-Source%20Available%20(MIT%20%2B%20Commons%20Clause)-blue.svg)](LICENSE)
 ![Platform: macOS 14+](https://img.shields.io/badge/Platform-macOS%2014%2B-black.svg)
 
 A macOS menu-bar app that makes your keyboard's **volume keys actually work** when
@@ -220,6 +220,17 @@ rm -rf "$HOME/Library/Application Support/g8-volume"  # venv + token + ip cache
   reservation** for the monitor (and prefer a stable connection) to avoid the churn
   entirely.
 
+## Why this license?
+
+Samsung Volume Keys is free to use, modify, and share for any **noncommercial** purpose —
+personal use, hobby projects, tinkering, learning, and contributions back are all
+welcome and always will be. The one thing the license doesn't permit is **selling**
+the software (or charging for hosting/support whose value comes mainly from it).
+
+I built this to solve my own problem and I'm happy to share it freely; I just don't
+want it repackaged and sold out from under the people it's meant to help. If you
+have a commercial use in mind, get in touch and we can sort something out.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Source-available under the **MIT License with the Commons Clause** — free to use, modify, and redistribute for any **noncommercial** purpose; you may not sell the software. See [LICENSE](LICENSE).
