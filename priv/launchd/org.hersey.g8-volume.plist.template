@@ -3,7 +3,8 @@
 <!--
   LaunchAgent for the G8 volume bridge daemon. Holds one persistent WebSocket to
   the monitor and exposes a localhost-only HTTP control surface on 127.0.0.1:8765.
-  Placeholders @PY@ (venv python), @SCRIPT@ (daemon), @HOME@ are filled by install.sh.
+  Runs boot.sh, which self-heals the venv (e.g. after a Homebrew Python upgrade)
+  then execs the daemon. Placeholders @BOOT@ (boot.sh) and @HOME@ filled by install.sh.
 -->
 <plist version="1.0">
 <dict>
@@ -12,8 +13,8 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>@PY@</string>
-    <string>@SCRIPT@</string>
+    <string>/bin/bash</string>
+    <string>@BOOT@</string>
   </array>
 
   <key>EnvironmentVariables</key>

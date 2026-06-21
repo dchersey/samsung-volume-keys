@@ -72,7 +72,7 @@ final class StatusModel {
       muteHeld = true
       muted.toggle()
       VolumeHUD.shared.show(action: "mute", muted: muted, device: outputName)
-      enqueueSend("mute")
+      enqueueSend("mute", primary: true)
       return
     }
 
@@ -82,7 +82,7 @@ final class StatusModel {
       armWatchdog()
       if heldDirs.insert(cmd).inserted {     // first press → start the native ramp
         muted = false
-        enqueueSend("press/\(cmd)")
+        enqueueSend("press/\(cmd)", primary: true)
       }                                      // repeats: just keep the HUD + watchdog alive
     } else {
       if heldDirs.remove(cmd) != nil {
@@ -108,12 +108,24 @@ final class StatusModel {
     holdWatchdog = nil
   }
 
-  /// Serialize sends so a Press always reaches the daemon before its Release.
-  private func enqueueSend(_ path: String) {
+  /// Serialize sends so a Press always reaches the daemon before its Release. For a
+  /// `primary` action (the initial press / mute), surface an actionable HUD error if
+  /// it couldn't land — so a flap or a missing Local Network grant doesn't look like
+  /// nothing happened.
+  private func enqueueSend(_ path: String, primary: Bool = false) {
     let prev = sendChain
+    let dev = outputName
     sendChain = Task { @MainActor in
       _ = await prev.value
-      if await Bridge.send(path) != nil { daemonOK = true }
+      let reply = await Bridge.send(path)
+      if reply?.ok == true {
+        daemonOK = true
+        if let ip = reply?.tv_ip { tvIP = ip }
+      } else if primary {
+        daemonOK = (reply != nil)                       // up (502) vs daemon down (nil)
+        let hint = reply?.hint ?? (reply == nil ? "daemon" : "unreachable")
+        VolumeHUD.shared.showError(hint: hint, device: dev)
+      }
     }
   }
 

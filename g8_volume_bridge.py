@@ -30,11 +30,11 @@ import socket
 import subprocess
 import threading
 import time
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from samsungtvws import SamsungTVWS
+from websocket import WebSocketTimeoutException
 
 # ---------------------------------------------------------------------------
 # CONFIG  — TV_IP and KNOWN_MAC are the G8's; only change if you swap monitors.
@@ -47,6 +47,7 @@ TOKEN_FILE = os.path.join(CONFIG_DIR, "token.txt")
 IP_CACHE   = os.path.join(CONFIG_DIR, "last_ip.txt")
 KEEPALIVE_SECS = 25                                     # keepalive / sleep-check cadence
 STALE_AFTER    = 120                                    # idle secs before we distrust the socket
+SOCKET_TIMEOUT = 5                                      # secs; bounds send() so it can't hang
 # ---------------------------------------------------------------------------
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -59,15 +60,6 @@ _lock = threading.Lock()      # serialise samsungtvws access (one socket)
 # ---------------------------------------------------------------------------
 # IP discovery (cache -> configured TV_IP -> MAC scan), all cheap & tolerant.
 # ---------------------------------------------------------------------------
-def _alive(ip, timeout=1.5):
-    """True if `ip` answers the Samsung device-info endpoint."""
-    try:
-        with urllib.request.urlopen(f"http://{ip}:8001/api/v2/", timeout=timeout) as r:
-            return r.status == 200
-    except Exception:
-        return False
-
-
 def _read_cache():
     try:
         with open(IP_CACHE) as f:
@@ -95,72 +87,69 @@ def _local_subnet_prefix():
     return ip.rsplit(".", 1)[0] + "."
 
 
-def _scan_for_mac():
-    """Ping-sweep the local /24 to populate ARP, then find KNOWN_MAC's IP.
-
-    Falls back to matching any host whose :8001 device-info names the G8.
-    """
-    try:
-        prefix = _local_subnet_prefix()
-    except Exception:
-        return None
-
-    # Populate the ARP cache with a quick concurrent ping sweep.
-    def _ping(host):
-        subprocess.run(["ping", "-c", "1", "-W", "1", host],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    with ThreadPoolExecutor(max_workers=64) as pool:
-        pool.map(_ping, [f"{prefix}{i}" for i in range(1, 255)])
-
-    # Look the MAC up in the ARP table.
-    try:
-        out = subprocess.run(["arp", "-an"], capture_output=True, text=True).stdout
-    except Exception:
-        out = ""
-    want = KNOWN_MAC.lower()
-    for line in out.splitlines():
-        m = re.search(r"\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]+)", line, re.I)
-        if not m:
-            continue
-        ip, mac = m.group(1), _normalise_mac(m.group(2))
-        if mac == want and _alive(ip):
-            return ip
-
-    # Fallback: probe each ARP host's device-info for the G8 name/model.
-    hosts = re.findall(r"\((\d+\.\d+\.\d+\.\d+)\)", out)
-    for ip in hosts:
-        try:
-            with urllib.request.urlopen(f"http://{ip}:8001/api/v2/", timeout=1.0) as r:
-                dev = json.load(r).get("device", {})
-            blob = f"{dev.get('name','')} {dev.get('modelName','')}".lower()
-            if "odyssey" in blob or "g8" in blob:
-                return ip
-        except Exception:
-            continue
-    return None
-
-
 def _normalise_mac(mac):
     """Zero-pad each octet so '0:24:27:...' compares equal to '00:24:27:...'."""
     return ":".join(p.zfill(2) for p in mac.lower().split(":"))
 
 
-def discover_tv(force=False):
-    """Resolve the G8's IP, caching the winner. Order: cache, TV_IP, MAC scan."""
-    if not force:
-        cached = _read_cache()
-        if cached and _alive(cached):
-            return cached
-    if _alive(TV_IP):
-        _write_cache(TV_IP)
-        return TV_IP
-    found = _scan_for_mac()
-    if found:
-        _write_cache(found)
-        return found
-    # Nothing answered (monitor asleep?) — fall back to last known / configured.
+def _arp_lookup(mac):
+    """Current IP for `mac` from the OS ARP cache — instant, no network. The monitor
+    talks to us constantly, so its current IP (even after a DHCP change) is normally
+    already here."""
+    try:
+        out = subprocess.run(["arp", "-an"], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return None
+    want = _normalise_mac(mac)
+    for line in out.splitlines():
+        m = re.search(r"\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]+)", line, re.I)
+        if m and _normalise_mac(m.group(2)) == want:
+            return m.group(1)
+    return None
+
+
+def _ping_sweep(budget=2.5):
+    """Bounded, best-effort ping sweep to (re)populate ARP. BACKGROUND use only — it
+    must never run in the synchronous reconnect path (a full sweep there once hung
+    every keypress for seconds on flaky WiFi)."""
+    try:
+        prefix = _local_subnet_prefix()
+    except Exception:
+        return
+    deadline = time.time() + budget
+
+    def _ping(host):
+        if time.time() > deadline:
+            return
+        try:
+            subprocess.run(["ping", "-c", "1", "-t", "1", host],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.5)
+        except Exception:
+            pass
+
+    pool = ThreadPoolExecutor(max_workers=32)
+    futs = [pool.submit(_ping, f"{prefix}{i}") for i in range(1, 255)]
+    _futures_wait(futs, timeout=budget)
+    pool.shutdown(wait=False, cancel_futures=True)
+
+
+def discover_tv():
+    """Resolve the monitor's IP INSTANTLY: ARP cache (tracks DHCP) → last-known → TV_IP.
+    No ping sweep here — that's the bounded background fallback in _rediscover()."""
+    ip = _arp_lookup(KNOWN_MAC)
+    if ip:
+        _write_cache(ip)
+        return ip
     return _read_cache() or TV_IP
+
+
+def _rediscover():
+    """Bounded background refresh: sweep to repopulate ARP, then re-resolve the IP."""
+    _ping_sweep()
+    ip = _arp_lookup(KNOWN_MAC)
+    if ip:
+        _write_cache(ip)
+    return ip
 
 
 # ---------------------------------------------------------------------------
@@ -191,33 +180,63 @@ def _new_tv(ip):
     # key_press_delay defaults to 1.5s in the library — lethal for volume; force 0.
     # timeout bounds the connect handshake so an asleep TV doesn't hang reconnects.
     return SamsungTVWS(host=ip, port=8002, token_file=TOKEN_FILE,
-                       name="MacVolumeBridge", key_press_delay=0, timeout=5)
+                       name="MacVolumeBridge", key_press_delay=0, timeout=SOCKET_TIMEOUT)
 
 
 def _listen(conn):
-    """Drain frames so a TV-side close is seen at once, then warm a fresh socket."""
-    try:
-        while conn.recv():
-            pass
-    except Exception:
-        pass
-    _warm()                       # connection died — reconnect in the background
+    """Drain frames so a TV-side close is seen promptly, then warm a fresh socket.
+
+    The socket has a finite timeout (so send() can never hang on a half-open
+    socket), which means recv() times out periodically while idle. A timeout is
+    NOT a close — keep reading; only an empty read or a real error means death.
+    """
+    while True:
+        try:
+            if not conn.recv():
+                break                     # '' → the TV closed the socket
+        except WebSocketTimeoutException:
+            continue                      # idle; the timeout just keeps send() bounded
+        except Exception:
+            break                         # real socket error → reconnect
+    _warm()                               # connection died — reconnect in the background
 
 
 def _connect():
     """Open a fresh warm connection (+ reader) to _tv_ip. Raises if unreachable."""
     global tv, _last_activity
     t = _new_tv(_tv_ip)
-    t.open()                      # TLS + token handshake (the slow part) up front
-    t.connection.settimeout(None)  # but the reader must block indefinitely, not time out
+    t.open()                          # TLS + token handshake (the slow part) up front
+    t.connection.settimeout(SOCKET_TIMEOUT)  # finite, so a send can never block forever
     threading.Thread(target=_listen, args=(t.connection,), daemon=True).start()
     tv = t
     _last_activity = time.time()
     return t
 
 
+_rediscovering = threading.Event()
+
+
+def _maybe_rediscover():
+    """Run ONE bounded background ARP refresh (no-op if one is already running). Used
+    when the monitor seems to have moved IP — keeps the slow sweep off the hot path."""
+    if _rediscovering.is_set():
+        return
+    _rediscovering.set()
+
+    def _run():
+        try:
+            _rediscover()
+        finally:
+            _rediscovering.clear()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def force_reconnect():
-    """Drop any existing socket and build a fresh one (re-discovering the IP if needed)."""
+    """Drop the socket and rebuild it, BOUNDED. Tries the known IP a few times (a
+    flaky-Wi-Fi 'No route to host' clears in a moment), refreshing the IP from the
+    ARP cache between tries. Raises after ~1s if the monitor stays unreachable, so
+    callers fail fast (a press returns an error) instead of hanging for seconds."""
     global tv, _tv_ip
     try:
         if tv is not None:
@@ -225,11 +244,16 @@ def force_reconnect():
     except Exception:
         pass
     tv = None
-    try:
-        return _connect()
-    except Exception:
-        _tv_ip = discover_tv(force=True)
-        return _connect()
+    last_exc = None
+    for _ in range(3):
+        _tv_ip = discover_tv() or _tv_ip      # ARP-first, instant
+        try:
+            return _connect()
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(0.25)                  # let a transient flap clear, then retry
+    _maybe_rediscover()                       # maybe it moved IP — refresh ARP in background
+    raise last_exc if last_exc else ConnectionError("monitor unreachable")
 
 
 def _is_fresh():
@@ -291,9 +315,11 @@ def press(key, cmd="Click"):
     """
     global _last_activity
     with _lock:
+        conn = _ensure_connection()       # fresh, or a bounded reconnect; raises → HTTP 502
         try:
-            _ensure_connection().send_key(key, key_press_delay=0, cmd=cmd)
+            conn.send_key(key, key_press_delay=0, cmd=cmd)
         except Exception:
+            # The socket went bad between the check and the send — one reconnect + retry.
             force_reconnect().send_key(key, key_press_delay=0, cmd=cmd)
         _last_activity = time.time()
 
@@ -309,6 +335,74 @@ def press(key, cmd="Click"):
 # shows a RELATIVE up/down/mute HUD driven straight from the keypress, and the
 # daemon just relays keys. The only state worth reporting is the resolved IP.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Reachability hint — so the app's HUD can say WHY a key didn't land.
+# ---------------------------------------------------------------------------
+_hint = ""
+_hint_at = 0.0
+
+
+def _can_connect(host, port, timeout=1.5):
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        return True
+    except Exception:
+        return False
+    finally:
+        s.close()
+
+
+def _default_gateway():
+    try:
+        out = subprocess.run(["route", "-n", "get", "default"],
+                             capture_output=True, text=True, timeout=2).stdout
+        m = re.search(r"gateway:\s*([0-9.]+)", out)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _lan_blocked():
+    """True when the OS blocks LAN access entirely — the signature of a denied macOS
+    Local Network grant: a connect to the default gateway fails with EHOSTUNREACH
+    ('No route to host'), versus connecting or being refused when the LAN is fine."""
+    gw = _default_gateway()
+    if not gw:
+        return False
+    s = socket.socket()
+    s.settimeout(1.5)
+    try:
+        s.connect((gw, 80))
+        return False                       # connected → LAN reachable
+    except ConnectionRefusedError:
+        return False                       # refused → the host answered → LAN reachable
+    except OSError as exc:
+        return exc.errno == 65             # EHOSTUNREACH → the LAN itself is blocked
+    except Exception:
+        return False
+    finally:
+        s.close()
+
+
+def _reach_hint():
+    """Classify why a key didn't land (cached ~5s), for an actionable HUD message:
+    'local_network' (macOS is blocking the daemon's LAN access — grant it),
+    'unreachable' (network's fine but the monitor isn't), 'offline' (no network)."""
+    global _hint, _hint_at
+    if time.time() - _hint_at < 5:
+        return _hint
+    if _lan_blocked():
+        _hint = "local_network"
+    elif _can_connect("1.1.1.1", 443):
+        _hint = "unreachable"              # internet's fine → the monitor specifically is down
+    else:
+        _hint = "offline"
+    _hint_at = time.time()
+    return _hint
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +450,7 @@ class Handler(BaseHTTPRequestHandler):
             press(key, cmd)
         except Exception as exc:
             self.log_error("send failed: %s", exc)
-            self._json(502, {"error": str(exc)})
+            self._json(502, {"error": str(exc), "hint": _reach_hint()})
             return
 
         self._json(200, {"ok": True, "tv_ip": _tv_ip})

@@ -109,17 +109,23 @@ cd samsung-volume-keys
 ```
 
 Either way, `install.sh` sets up a Python venv (+ `samsungtvws`), installs the
-menu-bar app, and loads the daemon LaunchAgent. Then do the **two one-time manual
-steps** macOS requires — the app's menu shows a warning button for each until done:
+menu-bar app, and loads the daemon LaunchAgent. Then do the **one-time manual
+steps** macOS requires — the app's HUD/menu point you at each:
 
-1. **Grant two permissions** in System Settings → Privacy & Security, then relaunch
-   the app:
+1. **Grant the app two permissions** in System Settings → Privacy & Security, then
+   relaunch the app:
    - **Accessibility** → enable **G8 Volume** — lets the app create an
      event-altering tap (so it can suppress the key's no-op macOS HUD).
    - **Input Monitoring** → enable **G8 Volume** — lets that tap actually *receive*
      the key events. **Both are required**; with only Accessibility the tap is
      created but never sees a keypress.
-2. **Pair with the monitor.** With the G8 as your audio output, press a volume key.
+2. **Grant the daemon Local Network access.** System Settings → Privacy & Security →
+   **Local Network** → enable **Python**. macOS 15+ blocks LAN connections by
+   default, so without this the daemon can't reach the monitor (the keys do nothing).
+   If a key ever stops working, the on-screen HUD will say *"Allow Python local
+   network access"* — this is the toggle it means. (A Homebrew Python upgrade can
+   reset it, since the rebuilt venv is a new binary.)
+3. **Pair with the monitor.** With the G8 as your audio output, press a volume key.
    The monitor pops an **"Allow this device?"** dialog — accept it once with the G8
    remote. The token is saved to `~/.config/g8-volume/token.txt` and reused forever.
 
@@ -188,6 +194,16 @@ rm -rf "/Applications/G8 Volume.app"         # remove the app
   *before* sending, detects the wall-clock jump from sleep, and exposes `/warm`; the
   menu-bar app pings `/warm` on system wake, display wake, and when the G8 becomes
   the active output, so the (re)connect starts before you reach for the keys.
+- **Self-healing venv.** The LaunchAgent runs `boot.sh`, which rebuilds the venv if
+  its Python is missing (e.g. a Homebrew `python@3.13 → 3.14` upgrade deletes the
+  interpreter the venv pointed at) before launching the daemon — so a `brew upgrade`
+  doesn't brick the bridge. (The rebuilt Python is a new binary, so you may need to
+  re-allow it in Local Network — the HUD will say so.)
+- **Flaky Wi-Fi / DHCP churn.** Discovery is ARP-first (instant, tracks IP changes
+  with no ping sweep), reconnects are bounded, and a press that can't reach the
+  monitor **fails fast with an on-screen error** instead of hanging. Pin a **DHCP
+  reservation** for the monitor (and prefer a stable connection) to avoid the churn
+  entirely.
 
 ## License
 

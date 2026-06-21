@@ -33,13 +33,21 @@ if [ "$MODE" = "download" ]; then
   say "Downloading the daemon…"
   curl -fsSL "$RAW/g8_volume_bridge.py" -o "$HOME_DIR/g8_volume_bridge.py"
   curl -fsSL "$RAW/requirements.txt"    -o "$HOME_DIR/requirements.txt"
+  curl -fsSL "$RAW/boot.sh"             -o "$HOME_DIR/boot.sh"
+  chmod +x "$HOME_DIR/boot.sh"
 fi
 
-# 2. Python venv (a real CPython — NOT the pyenv shim, which launchd can't use) --
+# 2. Python venv (a real CPython — NOT the pyenv shim, which launchd can't use).
+#    boot.sh rebuilds this automatically if a Homebrew upgrade later breaks it.
 say "Setting up the Python venv…"
-PYBIN="${PYBIN:-/opt/homebrew/bin/python3.13}"
-[ -x "$PYBIN" ] || PYBIN="$(command -v python3.13 || command -v python3 || true)"
-[ -n "$PYBIN" ] || die "No python3 found. Install one (e.g. 'brew install python')."
+PYBIN="${PYBIN:-}"
+if [ -z "$PYBIN" ] || [ ! -x "$PYBIN" ]; then
+  for c in /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 \
+           /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    [ -x "$c" ] && PYBIN="$c" && break
+  done
+fi
+[ -n "$PYBIN" ] && [ -x "$PYBIN" ] || die "No python3 found. Install one (e.g. 'brew install python')."
 "$PYBIN" -m venv "$HOME_DIR/.venv"
 "$HOME_DIR/.venv/bin/pip" install --quiet --upgrade pip
 "$HOME_DIR/.venv/bin/pip" install --quiet -r "$HOME_DIR/requirements.txt"
@@ -72,8 +80,8 @@ cat > "$PLIST" <<PLIST
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$HOME_DIR/.venv/bin/python3</string>
-    <string>$HOME_DIR/g8_volume_bridge.py</string>
+    <string>/bin/bash</string>
+    <string>$HOME_DIR/boot.sh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

@@ -16,15 +16,14 @@ if [ "${1:-}" = "uninstall" ]; then
   exit 0
 fi
 
-PY="$REPO/.venv/bin/python3"
-SCRIPT="$REPO/g8_volume_bridge.py"
-[ -x "$PY" ] || { echo "ERROR: venv python not found at $PY — run the top-level install.sh first." >&2; exit 1; }
-[ -f "$SCRIPT" ] || { echo "ERROR: daemon not found at $SCRIPT" >&2; exit 1; }
+# The agent runs boot.sh (which self-heals the venv, then execs the daemon), so it
+# tolerates a Homebrew Python upgrade without a manual reinstall.
+BOOT="$REPO/boot.sh"
+[ -f "$BOOT" ] || { echo "ERROR: boot.sh not found at $BOOT" >&2; exit 1; }
 
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 
-sed -e "s|@PY@|$PY|g" \
-    -e "s|@SCRIPT@|$SCRIPT|g" \
+sed -e "s|@BOOT@|$BOOT|g" \
     -e "s|@HOME@|$HOME|g" \
     "$REPO/priv/launchd/$LABEL.plist.template" > "$PLIST"
 echo "Wrote $PLIST"
